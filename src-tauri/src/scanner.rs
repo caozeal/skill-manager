@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -11,14 +12,31 @@ use crate::model::{Agent, FileNode, LockEntry, MountInfo, MountType, Skill};
 const MAX_DEPTH: usize = 6;
 const MAX_ENTRIES: usize = 5000;
 
+/// 系统 tier 目录：这些目录本身不是技能，而是「一层容器」，
+/// 需要展开一层把其中的每个子目录作为独立技能展示。
+/// 例：Codex 的 ~/.codex/skills/.system/{imagegen,skill-creator,...}
+const TIER_DIRS: [&str; 3] = [".system", ".curated", ".experimental"];
+
+fn tier_label(dir_name: &str) -> &'static str {
+    match dir_name {
+        ".curated" => "精选",
+        ".experimental" => "实验",
+        _ => "内置",
+    }
+}
+
 /// 扫描单个 agent，返回技能列表（按名称排序）。
 /// 合并逻辑：
 /// - global_skills_source（如 Codex/DSH → 中央仓库）：源技能标 is_global=true（紫色「全局」）
 /// - compat_skills_source（如 OpenCode → ~/.claude/skills）：源技能标 is_compat=true（青色「兼容」）
 pub fn scan_agent(adapter: &AgentAdapter) -> Vec<Skill> {
     let mut skills = scan_local(adapter);
-    let mut seen: std::collections::HashSet<String> =
-        skills.iter().map(|s| s.folder.clone()).collect();
+    // 普通（本地/禁用）技能名先占位；系统 tier 项可被同名的全局/兼容技能顶掉
+    let mut seen: std::collections::HashSet<String> = skills
+        .iter()
+        .filter(|s| !s.is_system)
+        .map(|s| s.folder.clone())
+        .collect();
 
     if let Some(src_id) = adapter.global_skills_source {
         if let Some(src) = crate::adapters::find(src_id) {
@@ -26,6 +44,8 @@ pub fn scan_agent(adapter: &AgentAdapter) -> Vec<Skill> {
                 if s.is_system || seen.contains(&s.folder) {
                     continue; // 跳过源的内置项与已存在同名技能
                 }
+                // 同名的系统 tier 技能让位：全局技能优先级高于内置项
+                skills.retain(|x| !(x.is_system && x.folder == s.folder));
                 s.agent_id = adapter.id.to_string();
                 s.is_global = true;
                 seen.insert(s.folder.clone());
@@ -40,6 +60,7 @@ pub fn scan_agent(adapter: &AgentAdapter) -> Vec<Skill> {
                 if s.is_system || seen.contains(&s.folder) {
                     continue;
                 }
+                skills.retain(|x| !(x.is_system && x.folder == s.folder));
                 s.agent_id = adapter.id.to_string();
                 s.is_compat = true;
                 seen.insert(s.folder.clone());
@@ -64,48 +85,167 @@ pub fn scan_local(adapter: &AgentAdapter) -> Vec<Skill> {
     let central = fs::canonicalize(central_dir()).ok();
 
     let mut skills: Vec<Skill> = Vec::new();
+    // tier 容器目录延后处理（需先知道本地技能名，避免同名覆盖冲突）
+    let mut tier_dirs: Vec<(PathBuf, String)> = Vec::new();
     let entries = match fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(_) => return Vec::new(),
     };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') && name != ".system" {
-            continue; // 过滤 .DS_Store 等隐藏项，但保留 .system
-        }
         let path = entry.path();
         let lmeta = match fs::symlink_metadata(&path) {
             Ok(m) => m,
             Err(_) => continue,
         };
-        // 只处理目录（含指向目录的符号链接）；.system 本身是目录
+        // 只处理目录（含指向目录的符号链接）
         if !lmeta.is_dir() && !lmeta.file_type().is_symlink() {
+            continue; // 过滤 .DS_Store 等文件
+        }
+        // 系统 tier 容器：不作为一个技能，展开一层读取其中的技能
+        if TIER_DIRS.contains(&name.as_str()) {
+            if path.is_dir() {
+                tier_dirs.push((path.clone(), name.clone()));
+            }
             continue;
         }
-        let is_system = name == ".system";
-        let mount = mount_info(&path, central.as_deref());
-        let (fm_name, fm_desc, skill_md_found, modified) = read_skill_meta(&path);
-        let (dir_size, file_count) = dir_stats(&path);
-        let source = lockfile::lookup(&lock, &name).cloned();
-        skills.push(Skill {
-            agent_id: adapter.id.to_string(),
-            folder: name.clone(),
-            path: path.to_string_lossy().to_string(),
-            name: fm_name.unwrap_or_else(|| name.clone()),
-            description: fm_desc.unwrap_or_default(),
-            skill_md_found,
-            mount,
-            is_system,
-            is_global: false,
-            is_compat: false,
-            source: source.filter(|s: &LockEntry| !s.source.is_empty()),
-            dir_size,
-            file_count,
-            modified_at: modified,
-        });
+        // 隐藏目录（. 前缀）视为「已禁用」技能；folder 去前缀用于展示/匹配
+        let disabled = name.starts_with('.');
+        let display_name = if disabled {
+            name.strip_prefix('.').unwrap_or(&name).to_string()
+        } else {
+            name.clone()
+        };
+        if display_name.is_empty() {
+            continue;
+        }
+        skills.push(build_skill(
+            adapter,
+            &display_name,
+            &path,
+            false,
+            None,
+            disabled,
+            &lock,
+            central.as_deref(),
+        ));
     }
+    // 已禁用技能：skills 目录同级的 disabled-skills/（新版），
+    // skills 目录下的 `.` 前缀目录为旧版残留，上面已按 disabled 识别，此处只做兼容。
+    if let Some(ddir) = crate::adapters::disabled_dir(adapter) {
+        if let Ok(rd) = fs::read_dir(&ddir) {
+            for e in rd.flatten() {
+                let folder = e.file_name().to_string_lossy().to_string();
+                let p = e.path();
+                let lm = match fs::symlink_metadata(&p) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                if !lm.is_dir() && !lm.file_type().is_symlink() {
+                    continue;
+                }
+                if folder.is_empty() || folder.starts_with('.') {
+                    continue;
+                }
+                skills.push(build_skill(
+                    adapter,
+                    &folder,
+                    &p,
+                    false,
+                    None,
+                    true,
+                    &lock,
+                    central.as_deref(),
+                ));
+            }
+        }
+    }
+
+    // 若同 folder 存在正常技能，跳过其 disabled 副本（避免重名）
+    let active: std::collections::HashSet<String> = skills
+        .iter()
+        .filter(|s| !s.disabled)
+        .map(|s| s.folder.clone())
+        .collect();
+    skills.retain(|s| !s.disabled || !active.contains(&s.folder));
+
+    // 展开系统 tier 目录（如 Codex 的 .system），本地同名技能优先（可覆盖系统项）
+    let taken: std::collections::HashSet<String> =
+        skills.iter().map(|s| s.folder.clone()).collect();
+    for (tdir, tname) in tier_dirs {
+        let Ok(rd) = fs::read_dir(&tdir) else {
+            continue;
+        };
+        let label = tier_label(&tname);
+        let mut inner: Vec<(String, PathBuf)> = Vec::new();
+        for e in rd.flatten() {
+            let folder = e.file_name().to_string_lossy().to_string();
+            let p = e.path();
+            let lm = match fs::symlink_metadata(&p) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if !lm.is_dir() && !lm.file_type().is_symlink() {
+                continue;
+            }
+            if folder.is_empty() || folder.starts_with('.') || taken.contains(&folder) {
+                continue;
+            }
+            inner.push((folder, p));
+        }
+        inner.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+        for (folder, p) in inner {
+            skills.push(build_skill(
+                adapter,
+                &folder,
+                &p,
+                true,
+                Some(label),
+                false,
+                &lock,
+                central.as_deref(),
+            ));
+        }
+    }
+
     skills.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     skills
+}
+
+/// 构建单个技能条目
+#[allow(clippy::too_many_arguments)]
+fn build_skill(
+    adapter: &AgentAdapter,
+    display_name: &str,
+    path: &Path,
+    is_system: bool,
+    system_tier: Option<&str>,
+    disabled: bool,
+    lock: &HashMap<String, LockEntry>,
+    central: Option<&Path>,
+) -> Skill {
+    let mount = mount_info(path, central);
+    let (fm_name, fm_desc, skill_md_found, modified) = read_skill_meta(path);
+    let (dir_size, file_count) = dir_stats(path);
+    let source = lockfile::lookup(lock, display_name).cloned();
+    Skill {
+        agent_id: adapter.id.to_string(),
+        folder: display_name.to_string(),
+        path: path.to_string_lossy().to_string(),
+        name: fm_name.unwrap_or_else(|| display_name.to_string()),
+        description: fm_desc.unwrap_or_default(),
+        skill_md_found,
+        mount,
+        is_system,
+        is_global: false,
+        is_compat: false,
+        system_tier: system_tier.map(|s| s.to_string()),
+        disabled,
+        source: source.filter(|s: &LockEntry| !s.source.is_empty()),
+        dir_size,
+        file_count,
+        modified_at: modified,
+    }
 }
 
 /// Agent 概览（含计数）

@@ -7,7 +7,7 @@ export function MountTypeBadge({ skill }: { skill: Skill }) {
     return (
       <span
         className="inline-flex items-center gap-1 rounded bg-violet-50 px-1.5 py-0.5 text-[11px] text-violet-600"
-        title="全局技能：来自 ~/.agents/skills（中央仓库），对当前 agent 直接生效"
+        title="全局技能：位于中央仓库 ~/.agents/skills，对当前 agent 直接生效"
       >
         <Globe2 size={10} /> 全局
       </span>
@@ -17,16 +17,24 @@ export function MountTypeBadge({ skill }: { skill: Skill }) {
     return (
       <span
         className="inline-flex items-center gap-1 rounded bg-cyan-50 px-1.5 py-0.5 text-[11px] text-cyan-600"
-        title="兼容技能：来自 Claude 技能目录 ~/.claude/skills，OpenCode 兼容发现"
+        title="Claude 兼容技能：来自 ~/.claude/skills（OpenCode 可发现此目录）"
       >
         <Layers size={10} /> Claude 兼容
       </span>
     );
   }
   if (skill.isSystem) {
+    const label = skill.systemTier ?? "系统";
     return (
-      <span className="inline-flex items-center gap-1 rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-500">
-        <Lock size={10} /> 系统
+      <span
+        className="inline-flex items-center gap-1 rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-500"
+        title={
+          skill.systemTier
+            ? `${skill.systemTier}技能：由 ${skill.agentId} 的 tier 目录（.system/.curated/.experimental）提供，只读`
+            : "系统技能：由 agent 内置提供，只读"
+        }
+      >
+        <Lock size={10} /> {label}
       </span>
     );
   }

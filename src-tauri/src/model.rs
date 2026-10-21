@@ -63,6 +63,10 @@ pub struct Skill {
     pub is_system: bool,
     pub is_global: bool,
     pub is_compat: bool,
+    /// 系统 tier 目录标签（如 Codex 的 内置/精选/实验），非系统技能为 None
+    #[serde(default)]
+    pub system_tier: Option<String>,
+    pub disabled: bool,
     pub source: Option<LockEntry>,
     pub dir_size: u64,
     pub file_count: u32,

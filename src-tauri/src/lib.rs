@@ -3,8 +3,10 @@ mod commands;
 mod error;
 mod fsops;
 mod lockfile;
+mod mcp;
 mod model;
 mod scanner;
+mod usage;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -19,6 +21,18 @@ pub fn run() {
             commands::mount_skill,
             commands::unmount_skill,
             commands::update_frontmatter,
+            commands::disable_skill,
+            commands::enable_skill,
+            commands::delete_skill,
+            commands::get_agent_usage,
+            commands::refresh_agent_usage,
+            commands::get_all_usage,
+            commands::list_mcp_servers,
+            commands::list_mcp_targets,
+            commands::set_mcp_enabled,
+            commands::upsert_mcp_server,
+            commands::remove_mcp_server,
+            commands::sync_mcp_server,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

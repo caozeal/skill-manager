@@ -60,8 +60,8 @@ export function Dashboard() {
       {/* 统计卡片 */}
       <div className="mt-6 grid grid-cols-3 gap-3">
         <StatCard icon={<Grid3X3 size={15} />} label="Agent 数" value={`${standard.length + informational.length}`} sub={`${standard.length} 个可管理 · ${informational.length} 个只读展示`} />
-        <StatCard icon={<Database size={15} />} label="中央仓库技能" value={`${central?.skillCount ?? 0}`} sub={central?.exists ? "正常挂载中" : "未找到"} />
-        <StatCard icon={<Link2 size={15} />} label="技能挂载总数" value={`${totalSkills}`} sub={`${standard.reduce((n, a) => n + a.symlinkCount, 0)} 个符号链接`} />
+        <StatCard icon={<Database size={15} />} label="中央仓库技能" value={`${central?.skillCount ?? 0}`} sub={central?.exists ? "正常可用" : "未找到"} />
+        <StatCard icon={<Link2 size={15} />} label="技能总数" value={`${totalSkills}`} sub={`${standard.reduce((n, a) => n + a.symlinkCount, 0)} 个符号链接 · ${standard.reduce((n, a) => n + a.realCount, 0)} 个本地目录`} />
       </div>
 
       {/* Agent 卡片 */}

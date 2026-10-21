@@ -9,6 +9,7 @@ interface Candidate {
 export function MountDialog({
   agentId,
   agentName,
+  skillsPath,
   candidates,
   onMount,
   pending,
@@ -16,6 +17,7 @@ export function MountDialog({
 }: {
   agentId: string;
   agentName: string;
+  skillsPath: string | null;
   candidates: Candidate[];
   onMount: (folder: string) => void;
   pending: boolean;
@@ -93,7 +95,7 @@ export function MountDialog({
           <div className="w-[380px] rounded-2xl bg-white p-5 shadow-xl">
             <h3 className="text-[15px] font-semibold">确认挂载</h3>
             <div className="mt-3 rounded-lg bg-gray-50 p-3 text-[12px] leading-relaxed text-gray-600">
-              将在 <span className="font-mono">~/{agentId}/skills/</span> 下创建符号链接
+              将在 <span className="font-mono">{skillsPath ?? `~/.${agentId}/skills`}</span> 下创建符号链接
               <br />
               <span className="font-mono">{confirmFolder.folder}</span> →{" "}
               <span className="font-mono">~/.agents/skills/{confirmFolder.folder}</span>

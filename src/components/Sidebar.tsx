@@ -2,6 +2,7 @@ import { NavLink, useLocation } from "react-router-dom";
 import {
   LayoutDashboard,
   Grid3X3,
+  BarChart3,
   Terminal,
   Code2,
   Bot,
@@ -53,6 +54,12 @@ export function Sidebar() {
           icon={Grid3X3}
           label="挂载矩阵"
           active={location.pathname === "/matrix"}
+        />
+        <NavItem
+          to="/usage"
+          icon={BarChart3}
+          label="使用统计"
+          active={location.pathname === "/usage"}
         />
       </nav>
 

@@ -27,11 +27,45 @@ fn resolve_in_agent_dir(agent: &adapters::AgentAdapter, folder: &str) -> AppResu
         return Err(AppError::AgentNotFound(format!("非法路径: {folder}")));
     }
     let canon_dir = fs::canonicalize(dir).map_err(|_| AppError::AgentDirMissing)?;
+    let meta = fs::symlink_metadata(&full).map_err(|_| AppError::AgentDirMissing)?;
+    if meta.file_type().is_symlink() {
+        // 符号链接：只校验链接本体位于 agent 目录下（不跟随目标，
+        // 因为目标可能在中央仓库等 agent 目录之外）
+        return Ok(full);
+    }
     let canon_full = fs::canonicalize(&full).map_err(|_| AppError::AgentDirMissing)?;
     if !canon_full.starts_with(&canon_dir) {
         return Err(AppError::AgentNotFound(format!("非法路径: {folder}")));
     }
     Ok(canon_full)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 核心不变量：禁用目录必须在 skills 目录之外，否则 agent 仍可能扫描到
+    #[test]
+    fn disabled_dir_sits_outside_skills_dir() {
+        let agent = adapters::find("claude").expect("claude adapter 应存在");
+        let skills = agent.skills_path.as_ref().expect("claude 有 skills 目录");
+        let ddir = adapters::disabled_dir(agent).expect("应有 disabled 目录");
+        assert_eq!(ddir, skills.parent().unwrap().join("disabled-skills"));
+        assert!(!ddir.starts_with(skills), "禁用目录不能位于 skills 之内");
+    }
+}
+
+/// folder 必须是单层合法目录名（禁止绝对路径、.. 穿越）
+fn validate_folder(folder: &str) -> AppResult<()> {
+    if folder.is_empty() || folder == ".." {
+        return Err(AppError::AgentNotFound(format!("非法路径: {folder}")));
+    }
+    for c in Path::new(folder).components() {
+        if !matches!(c, Component::Normal(_)) {
+            return Err(AppError::AgentNotFound(format!("非法路径: {folder}")));
+        }
+    }
+    Ok(())
 }
 
 fn check_writable(agent: &adapters::AgentAdapter, folder: &str) -> AppResult<()> {
@@ -111,7 +145,92 @@ pub fn unmount_skill(agent_id: &str, folder: &str) -> AppResult<()> {
     fs::remove_file(&full).map_err(AppError::Io)
 }
 
-fn backup_tag() -> String {
+/// 禁用：将技能目录重命名为 `.name`（隐藏目录），agent 扫描会跳过 → 技能失效。
+/// 可逆：enable_skill 重命名回来。
+pub fn disable_skill(agent_id: &str, folder: &str) -> AppResult<()> {
+    let agent = adapters::find(agent_id).ok_or_else(|| AppError::AgentNotFound(agent_id.into()))?;
+    check_writable(agent, folder)?;
+    validate_folder(folder)?;
+    let dir = agent
+        .skills_path
+        .as_ref()
+        .filter(|_| agent.has_skills_dir)
+        .ok_or(AppError::AgentDirMissing)?;
+    let full = resolve_in_agent_dir(agent, folder)?;
+    // 目标必须位于 agent 技能目录根下（禁用只支持一层技能目录）
+    let canon_dir = fs::canonicalize(dir).map_err(|_| AppError::AgentDirMissing)?;
+    let parent = full.parent().unwrap_or(Path::new("/"));
+    let parent_canon = fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+    if parent_canon != canon_dir {
+        return Err(AppError::AgentNotFound(format!("不支持嵌套技能禁用: {folder}")));
+    }
+    // 移到 skills 同级目录，彻底脱离 agent 的扫描范围
+    let droot = adapters::disabled_dir(agent).ok_or(AppError::AgentDirMissing)?;
+    fs::create_dir_all(&droot).map_err(AppError::Io)?;
+    let dest = droot.join(folder);
+    if fs::symlink_metadata(&dest).is_ok() {
+        return Err(AppError::TargetExists);
+    }
+    fs::rename(&full, &dest).map_err(AppError::Io)
+}
+
+/// 启用：将 `.name` 重命名回 `name`
+pub fn enable_skill(agent_id: &str, folder: &str) -> AppResult<()> {
+    let agent = adapters::find(agent_id).ok_or_else(|| AppError::AgentNotFound(agent_id.into()))?;
+    check_writable(agent, folder)?;
+    validate_folder(folder)?;
+    let dir = agent
+        .skills_path
+        .as_ref()
+        .filter(|_| agent.has_skills_dir)
+        .ok_or(AppError::AgentDirMissing)?;
+    let enabled_path = dir.join(folder);
+    if fs::symlink_metadata(&enabled_path).is_ok() {
+        return Err(AppError::TargetExists);
+    }
+    // 新版位置：skills 同级的 disabled-skills/<folder>
+    let new_path = adapters::disabled_dir(agent)
+        .ok_or(AppError::AgentDirMissing)?
+        .join(folder);
+    // 旧版兼容：skills 下的 `.` 前缀目录
+    let legacy_path = dir.join(format!(".{folder}"));
+    let src = if fs::symlink_metadata(&new_path).is_ok() {
+        new_path
+    } else if fs::symlink_metadata(&legacy_path).is_ok() {
+        legacy_path
+    } else {
+        return Err(AppError::AgentNotFound(format!("未找到已禁用的技能: {folder}")));
+    };
+    let meta = fs::symlink_metadata(&src).map_err(AppError::Io)?;
+    if !meta.is_dir() && !meta.file_type().is_symlink() {
+        return Err(AppError::AgentNotFound(format!("未找到已禁用的技能: {folder}")));
+    }
+    fs::create_dir_all(dir).map_err(AppError::Io)?;
+    fs::rename(&src, &enabled_path).map_err(AppError::Io)
+}
+
+/// 删除：将技能目录移动到回收站 `~/.skill-manager-trash/<ts>-<folder>`（可手动恢复）。
+/// 仅支持真实目录；符号链接请用 unmount。
+pub fn delete_skill(agent_id: &str, folder: &str) -> AppResult<()> {
+    let agent = adapters::find(agent_id).ok_or_else(|| AppError::AgentNotFound(agent_id.into()))?;
+    check_writable(agent, folder)?;
+    let full = resolve_in_agent_dir(agent, folder)?;
+    let meta = fs::symlink_metadata(&full).map_err(AppError::Io)?;
+    if meta.file_type().is_symlink() {
+        return Err(AppError::MountNotSupported); // 链接请用卸载
+    }
+    if !meta.is_dir() {
+        return Err(AppError::AgentNotFound(format!("不是目录: {folder}")));
+    }
+    let trash = dirs::home_dir()
+        .expect("HOME 缺失")
+        .join(".skill-manager-trash");
+    fs::create_dir_all(&trash).map_err(AppError::Io)?;
+    let dest = trash.join(format!("{}-{}", backup_tag(), folder));
+    fs::rename(&full, &dest).map_err(AppError::Io)
+}
+
+pub fn backup_tag() -> String {
     let d = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();

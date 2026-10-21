@@ -1,9 +1,8 @@
 import { useState } from "react";
 import { X, BookOpen, FolderTree, Pencil, FolderOpen } from "lucide-react";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useSkillDetail } from "@/hooks";
 import { useDrawerStore } from "@/stores/ui";
-import { formatSize, formatTime, cn } from "@/lib/utils";
+import { formatSize, formatTime, cn, revealSkillInFinder } from "@/lib/utils";
 import { MarkdownView } from "@/components/MarkdownView";
 import { FileTreeRoot } from "@/components/FileTree";
 import { FrontmatterEditor } from "@/components/FrontmatterEditor";
@@ -42,7 +41,7 @@ export function SkillDetailDrawer() {
           <button
             className="mt-0.5 max-w-full truncate text-left text-[11px] text-gray-400 hover:text-blue-600"
             title={skill.path}
-            onClick={() => revealItemInDir(skill.path)}
+            onClick={() => revealSkillInFinder(skill.path, skill.mount.mountType)}
           >
             {skill.path}
           </button>
@@ -109,7 +108,7 @@ export function SkillDetailDrawer() {
       <div className="border-t border-black/8 px-4 py-2">
         <button
           className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-black/10 py-1.5 text-[12px] text-gray-600 hover:bg-gray-50"
-          onClick={() => revealItemInDir(skill.path)}
+          onClick={() => revealSkillInFinder(skill.path, skill.mount.mountType)}
         >
           <FolderOpen size={13} /> 在 Finder 中显示
         </button>
